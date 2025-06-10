@@ -1,0 +1,223 @@
+#!/usr/bin/env python3
+"""
+process_files.py
+
+A Python script with a Tkinter GUI to select:
+- a header (.info) file
+- a data file (tab-delimited with variable columns)
+- a timestamps file (tab-delimited)
+- an output path
+
+It extracts:
+- Key header fields (Version, Nome_do_sujeito, Nome_da_sessao,
+  Data_Inicio, Hora_Inicio, Data_Termino, Hora_Termino, Duration, Resultado)
+- From the data file:
+  • Block: Session.Block.UID
+  • Tentativa: Session.Block.Trial.UID
+  • Tipo: Session.Block.Trial.Name
+  • Resultado: Result
+- Relação: for each (Block, Tentativa), extracted from the timestamps file’s
+  drag/drop annotation following the corresponding Hit.Start or Miss.Start.
+
+Outputs:
+1. Header fields
+2. Summary: Hit Count, Miss Count, Hit Trial, Hit Block, Miss Trial, Miss Block,
+   Hit Percentage, Miss Percentage
+3. Tipo summary table: Tipo, Quantidade de acertos, Quantidade de erros
+4. Detailed table: Block, Tentativa, Tipo, Resultado, Relação
+
+To build a Windows executable:
+    pyinstaller --onefile --windowed process_files.py
+
+Usage:
+    Run the script or .exe, choose files via the GUI, and click 'Process'.
+"""
+import csv
+import re
+import tkinter as tk
+from tkinter import filedialog, messagebox
+
+
+def read_header(path):
+    keys = [
+        "Version", "Nome_do_sujeito", "Nome_da_sessao", "Data_Inicio",
+        "Hora_Inicio", "Data_Termino", "Hora_Termino", "Duration", "Resultado"
+    ]
+    kept = []
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            for line in f:
+                stripped = line.rstrip('\n')
+                for k in keys:
+                    if stripped.startswith(k + ':'):
+                        kept.append(stripped)
+                        break
+    except Exception as e:
+        messagebox.showerror("Error", f"Cannot read header: {e}")
+        return None
+    return kept
+
+
+def parse_relations(path):
+    '''Build a map from (block, trial) to drag-drop relation string'''
+    rel_map = {}
+    try:
+        with open(path, newline='', encoding='utf-8') as f:
+            reader = csv.DictReader(f, delimiter='\t')
+            rows = list(reader)
+            for i, row in enumerate(rows[:-1]):
+                ev = row.get('Event', '').strip()
+                if ev in ('Hit.Start', 'Miss.Start'):
+                    block = row.get('Session.Block.UID', '').strip()
+                    trial = row.get('Session.Trial.UID', '').strip()
+                    ann = rows[i+1].get('Event.Annotation', '').strip()
+                    m1 = re.search(r'drag:\{name:([^,}]+)', ann)
+                    m2 = re.search(r'drop:\{name:([^,}]+)', ann)
+                    rel = f"{m1.group(1)} - {m2.group(1)}" if m1 and m2 else ''
+                    rel_map[(block, trial)] = rel
+    except Exception as e:
+        messagebox.showerror("Error", f"Cannot parse timestamps for relations: {e}")
+        return None
+    return rel_map
+
+
+def parse_data(path, rel_map):
+    rows_out = []
+    try:
+        with open(path, newline='', encoding='utf-8') as f:
+            reader = csv.reader(f, delimiter='\t')
+            header = next(reader)
+            idx = {name: i for i, name in enumerate(header)}
+            required = [
+                'Session.Block.UID', 'Session.Block.Trial.UID',
+                'Session.Block.Trial.Name', 'Result'
+            ]
+            for col in required:
+                if col not in idx:
+                    raise ValueError(f"Missing column: {col}")
+            for row in reader:
+                if not row or row[0] == 'Report.Timestamp':
+                    continue
+                block = row[idx['Session.Block.UID']].strip()
+                trial = row[idx['Session.Block.Trial.UID']].strip()
+                tipo = row[idx['Session.Block.Trial.Name']].strip()
+                resultado = row[idx['Result']].strip()
+                rel = rel_map.get((block, trial), '')
+                rows_out.append((block, trial, tipo, resultado, rel))
+    except Exception as e:
+        messagebox.showerror("Error", f"Cannot parse data file: {e}")
+        return None
+    return rows_out
+
+
+def write_output(header, rows, path):
+    # Compute overall summary
+    hits = [r for r in rows if r[3] == 'Hit']
+    misses = [r for r in rows if r[3] == 'Miss']
+    total = len(hits) + len(misses)
+    hit_pct = (len(hits) / total * 100) if total else 0.0
+    miss_pct = (len(misses) / total * 100) if total else 0.0
+    hit_trials = ', '.join(r[1] for r in hits)
+    hit_blocks = ', '.join(r[0] for r in hits)
+    miss_trials = ', '.join(r[1] for r in misses)
+    miss_blocks = ', '.join(r[0] for r in misses)
+    # Compute tipo summary
+    tipo_counts = {}
+    for _, _, tipo, resultado, _ in rows:
+        if tipo not in tipo_counts:
+            tipo_counts[tipo] = {'acertos': 0, 'erros': 0}
+        if resultado == 'Hit':
+            tipo_counts[tipo]['acertos'] += 1
+        elif resultado == 'Miss':
+            tipo_counts[tipo]['erros'] += 1
+    try:
+        with open(path, 'w', encoding='utf-8') as f:
+            # Header lines
+            for line in header:
+                f.write(line + '\n')
+            f.write('\n')
+            # Summary
+            f.write(f"Hit Count: {len(hits)}\n")
+            f.write(f"Miss Count: {len(misses)}\n")
+            f.write(f"Hit Trial: {hit_trials}\n")
+            f.write(f"Hit Block: {hit_blocks}\n")
+            f.write(f"Miss Trial: {miss_trials}\n")
+            f.write(f"Miss Block: {miss_blocks}\n")
+            f.write(f"Hit Percentage: {hit_pct:.2f}%\n")
+            f.write(f"Miss Percentage: {miss_pct:.2f}%\n\n")
+            # Tipo summary table
+            f.write("Tipo      Quantidade de acertos      Quantidade de erros\n")
+            for tipo, counts in tipo_counts.items():
+                f.write(f"{tipo}{' ' * 12}{counts['acertos']}{' ' * 12}{counts['erros']}\n")
+            f.write('\n')
+            # Detailed table
+            f.write("Block      Tentativa      Tipo      Resultado      Relação\n")
+            for block, trial, tipo, resultado, rel in rows:
+                f.write(f"{block}{' ' * 12}{trial}{' ' * 12}{tipo}{' ' * 12}{resultado}{' ' * 12}{rel}\n")
+    except Exception as e:
+        messagebox.showerror("Error", f"Cannot write output: {e}")
+        return False
+    return True
+
+
+class App:
+    def __init__(self, root):
+        root.title("Process Files GUI")
+        # Header file
+        tk.Label(root, text="Header (.info):").grid(row=0, column=0, sticky="e")
+        self.header_var = tk.StringVar()
+        tk.Entry(root, textvariable=self.header_var, width=40).grid(row=0, column=1)
+        tk.Button(root, text="Browse", command=self.browse_header).grid(row=0, column=2)
+        # Data file
+        tk.Label(root, text="Data file (.data/.timestamps/.csv):").grid(row=1, column=0, sticky="e")
+        self.data_var = tk.StringVar()
+        tk.Entry(root, textvariable=self.data_var, width=40).grid(row=1, column=1)
+        tk.Button(root, text="Browse", command=self.browse_data_file).grid(row=1, column=2)
+        # Timestamps file
+        tk.Label(root, text="Timestamps (.timestamps):").grid(row=2, column=0, sticky="e")
+        self.timestamps_var = tk.StringVar()
+        tk.Entry(root, textvariable=self.timestamps_var, width=40).grid(row=2, column=1)
+        tk.Button(root, text="Browse", command=self.browse_timestamps).grid(row=2, column=2)
+        # Output file
+        tk.Label(root, text="Output (.txt):").grid(row=3, column=0, sticky="e")
+        self.output_var = tk.StringVar()
+        tk.Entry(root, textvariable=self.output_var, width=40).grid(row=3, column=1)
+        tk.Button(root, text="Browse", command=self.browse_output).grid(row=3, column=2)
+        # Process button
+        tk.Button(root, text="Process", command=self.process).grid(row=4, column=1, pady=10)
+
+    def browse_header(self):
+        path = filedialog.askopenfilename(filetypes=[("Info files", "*.info"), ("All files", "*")])
+        if path: self.header_var.set(path)
+
+    def browse_data_file(self):
+        path = filedialog.askopenfilename(filetypes=[("Data files", ("*.data", "*.timestamps", "*.csv")), ("All files", "*")])
+        if path: self.data_var.set(path)
+
+    def browse_timestamps(self):
+        path = filedialog.askopenfilename(filetypes=[("Timestamp files", "*.timestamps"), ("All files", "*")])
+        if path: self.timestamps_var.set(path)
+
+    def browse_output(self):
+        path = filedialog.asksaveasfilename(defaultextension=".txt", filetypes=[("Text files", "*.txt"), ("All files", "*")])
+        if path: self.output_var.set(path)
+
+    def process(self):
+        header = read_header(self.header_var.get())
+        if header is None: return
+        rel_map = parse_relations(self.timestamps_var.get())
+        if rel_map is None: return
+        rows = parse_data(self.data_var.get(), rel_map)
+        if rows is None: return
+        if write_output(header, rows, self.output_var.get()):
+            messagebox.showinfo("Success", "Processing complete!")
+
+
+def main():
+    root = tk.Tk()
+    App(root)
+    root.mainloop()
+
+
+if __name__ == '__main__':
+    main()
